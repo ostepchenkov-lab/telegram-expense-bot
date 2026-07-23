@@ -1,6 +1,8 @@
 import asyncio
 import os
 import logging
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 
 from dotenv import load_dotenv
 from telegram import Update, BotCommand
@@ -25,6 +27,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - Telegram Expense Bot is running!")
+
+    def log_message(self, format, *args):
+        pass  # Suppress HTTP access logging
+
+
+def start_dummy_health_server():
+    """Starts a lightweight HTTP server if PORT environment variable is present (for Render Web Services)."""
+    port_str = os.getenv("PORT")
+    if port_str:
+        port = int(port_str)
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        logger.info(f"🌐 Health check HTTP server started on port {port}")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "👋 Привіт! Я бот для обліку витрат.\n\n"
@@ -45,6 +69,9 @@ async def run_bot() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env файлі")
+
+    # Start health check server if PORT is defined (e.g. Render Web Service)
+    start_dummy_health_server()
 
     app = (
         ApplicationBuilder()
