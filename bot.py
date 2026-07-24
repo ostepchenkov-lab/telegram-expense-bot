@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 from datetime import datetime
@@ -135,7 +136,7 @@ def append_expense(expense: dict) -> str:
 
     # Row format: [Дата, Дохід, Витрати, Баланс, Опис, Категорія]
     row = [
-        expense.get("date", ""),
+        expense.get("date", datetime.now().strftime("%d.%m.%Y")),
         income_val,
         expense_val,
         balance_formula,
@@ -144,6 +145,50 @@ def append_expense(expense: dict) -> str:
     ]
     sheet.append_row(row, value_input_option="USER_ENTERED")
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+
+
+def parse_expense_from_message_text(msg_text: str) -> dict:
+    """Fallback parser: extracts expense data directly from the Telegram confirmation message text if memory is cleared after bot restart."""
+    expense = {
+        "date": datetime.now().strftime("%d.%m.%Y"),
+        "amount": 0.0,
+        "transaction_type": "expense",
+        "description": "",
+        "category": "в",
+    }
+    try:
+        # Date
+        date_match = re.search(r"Дата:\s*`?([\d\.]+)`?", msg_text)
+        if date_match:
+            expense["date"] = date_match.group(1)
+
+        # Amount and Type
+        if "Дохід:" in msg_text:
+            expense["transaction_type"] = "income"
+            amt_match = re.search(r"Дохід:\s*`?([\d\.]+)`?", msg_text)
+            if amt_match:
+                expense["amount"] = float(amt_match.group(1))
+        else:
+            expense["transaction_type"] = "expense"
+            amt_match = re.search(r"Витрати:\s*`?([\d\.]+)`?", msg_text)
+            if amt_match:
+                expense["amount"] = float(amt_match.group(1))
+
+        # Description
+        desc_match = re.search(r"Опис:\s*`?([^`\n]+)`?", msg_text)
+        if desc_match:
+            expense["description"] = desc_match.group(1).strip()
+
+        # Category
+        cat_match = re.search(r"Категорія:\s*`?([^`\n]+)`?", msg_text)
+        if cat_match:
+            cat_val = cat_match.group(1).strip()
+            expense["category"] = "р" if cat_val in ["р", "Реактор"] else "в"
+
+    except Exception as e:
+        logger.error(f"Error fallback parsing message text: {e}")
+
+    return expense
 
 
 # ----------------------------------------------------
@@ -220,9 +265,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     if query.data == "confirm_expense":
+        # 1. Try memory
         expense = context.user_data.get("pending_expense")
-        if not expense:
-            await query.edit_message_text("⚠️ Дані не знайдено. Спробуй знову.")
+
+        # 2. Fallback: Parse directly from the message text if bot was restarted
+        if not expense and query.message and query.message.text:
+            logger.info("Memory empty. Falling back to parsing message text...")
+            expense = parse_expense_from_message_text(query.message.text)
+
+        if not expense or not expense.get("amount"):
+            await query.edit_message_text("⚠️ Дані не знайдено. Надішли голосове ще раз.")
             return
 
         try:
