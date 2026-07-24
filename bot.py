@@ -43,31 +43,44 @@ SCOPES = [
 
 CATEGORIES = ["в", "р"]
 
-SYSTEM_PROMPT = f"""Ти асистент для обліку фінансів (доходів та витрат). Твоя задача — розпарсити текст і повернути JSON з такими полями:
-- amount: число (float), сума
-- transaction_type: рядок, "income" (якщо це дохід/прихід/заробив/отримав/зайшло) або "expense" (якщо це витрата/витратив/оплатив/купив/поповнив/віддав)
-- description: рядок, ТІЛЬКИ короткий опис предмета чи суті операції (до 40 символів).
-- category: одне з двох значень: {json.dumps(CATEGORIES, ensure_ascii=False)}
+SYSTEM_PROMPT = f"""Ти асистент для обліку фінансів. Розпарси текст та поверни JSON:
+- amount: float, чисельне значення суми.
+- transaction_type: "income" (якщо дохід/прихід/заробив/отримав) або "expense" (якщо витрата/витратив/оплатив/купив/віддав).
+- description: рядок, ТІЛЬКИ назва товару, послуги чи адресата (без слів "витратив", "сума", "гривень", без чисел та без вказівки категорій!).
+- category: "в" або "р".
 
-ВАЖЛИВІ ПРАВИЛА ДЛЯ ОПИСУ (description):
-- В опис входить ТІЛЬКИ суть витрати чи доходу (наприклад: "Каса Наташа", "Відправка документів", "Оплата за проект").
-- КРИТИЧНО: ВИДАЛЯЙ з опису слова "витратив", "заробив", "отримав", "гривень", "грн", "доларів", самі суми (наприклад "2500"), а також назви категорій ("категорія Р", "категорія В", "категорія ворк", "категорія реактор").
-- Опис має бути чистим і коротким!
+Приклади:
+Текст: "Витрати в 2500 гривень. Каса Наташа."
+JSON: {{"amount": 2500.0, "transaction_type": "expense", "description": "Каса Наташа", "category": "в"}}
 
-Правила вибору категорії:
-- "в" — все що стосується роботи, послуг, документів, зарплат, сервісів, логістики, або коли явно вказано "в", "ворк", "work", "робота".
-- "р" — все що стосується проектів/об'єктів "Реактор", каси реактора, оренди реактора, або коли явно вказано "р", "реактор", "reactor".
-
-Якщо з тексту складно визначити категорію — обери найбільш відповідне із двох ("в" або "р").
-Якщо не можеш визначити суму — поверни null для amount.
-
-Поверни ТІЛЬКИ валідний JSON без додаткового тексту. Приклади:
-Вхід: "Витратив 2500 гривень каса Наташа категорія Р"
-JSON: {{"amount": 2500.0, "transaction_type": "expense", "description": "Каса Наташа", "category": "р"}}
-
-Вхід: "Отримав 5000 грн за дизайн категорія ворк"
-JSON: {{"amount": 5000.0, "transaction_type": "income", "description": "Дизайн", "category": "в"}}
+Текст: "Отримав 5000 грн за проект категорія р"
+JSON: {{"amount": 5000.0, "transaction_type": "income", "description": "За проект", "category": "р"}}
 """
+
+def clean_description_text(desc: str) -> str:
+    """Python regex cleaner that guarantees removal of unwanted words (amounts, currency, category words, 'витрати в')."""
+    if not desc:
+        return ""
+    
+    cleaned = desc
+    # Remove category markers
+    cleaned = re.sub(r"категорі[яі]\s*«?[врвР]»?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"категорі[яі]\s*«?(ворк|реактор)»?", "", cleaned, flags=re.IGNORECASE)
+    
+    # Remove expense/income prefix words
+    cleaned = re.sub(r"^(витрати|витратив|витратила|оплатив|оплачено|отримав|заробив|прихід)\s*(в|на|за)?\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(витрати|витратив|витратила|оплатив|оплачено)\b", "", cleaned, flags=re.IGNORECASE)
+    
+    # Remove numbers and currency
+    cleaned = re.sub(r"\b\d+([.,]\d+)?\b", "", cleaned)
+    cleaned = re.sub(r"\b(гривень|гривні|грн|доларів|дол|usd|uah|євро)\b", "", cleaned, flags=re.IGNORECASE)
+    
+    # Remove leading/trailing punctuation and space
+    cleaned = re.sub(r"^[.,\s\-–—:]+", "", cleaned)
+    cleaned = re.sub(r"[.,\s\-–—:]+$", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    return cleaned if cleaned else desc
 
 # ----------------------------------------------------
 # 2. Services (Transcriber, Parser, Sheets)
@@ -98,6 +111,10 @@ def parse_expense(text: str) -> dict:
 
     data = json.loads(response.choices[0].message.content)
     data["date"] = datetime.now().strftime("%d.%m.%Y")
+
+    # Clean description with python regex safety net
+    raw_desc = data.get("description", "")
+    data["description"] = clean_description_text(raw_desc)
 
     if data.get("category") not in CATEGORIES:
         data["category"] = "в"
@@ -185,7 +202,7 @@ def parse_expense_from_message_text(msg_text: str) -> dict:
         # Description
         desc_match = re.search(r"Опис:\s*`?([^`\n]+)`?", msg_text)
         if desc_match:
-            expense["description"] = desc_match.group(1).strip()
+            expense["description"] = clean_description_text(desc_match.group(1).strip())
 
         # Category
         cat_match = re.search(r"Категорія:\s*`?([^`\n]+)`?", msg_text)
