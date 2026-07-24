@@ -40,24 +40,24 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-CATEGORIES = ["Ворк", "Реактор"]
+CATEGORIES = ["в", "р"]
 
-SYSTEM_PROMPT = f"""Ти асистент для обліку витрат. Твоя задача — розпарсити текст і повернути JSON з такими полями:
-- amount: число (float), сума витрат
-- currency: рядок, валюта (за замовчуванням "UAH")
-- description: рядок, коротка суть витрати (до 60 символів)
+SYSTEM_PROMPT = f"""Ти асистент для обліку фінансів (доходів та витрат). Твоя задача — розпарсити текст і повернути JSON з такими полями:
+- amount: число (float), сума
+- transaction_type: рядок, "income" (якщо це дохід/прихід/заробив/отримав/зайшло) або "expense" (якщо це витрата/витратив/оплатив/купив/поповнив/віддав)
+- description: рядок, коротка суть (до 60 символів)
 - category: одне з двох значень: {json.dumps(CATEGORIES, ensure_ascii=False)}
 
 Правила вибору категорії:
-- "Ворк" — все що стосується роботи, послуг, документів, зарплат, сервісів, логістики, допоміжних витрат, або коли явно вказано "ворк", "work", "робота".
-- "Реактор" — все що стосується проектів чи об'єктів "Реактор", поповнення каси реактора, оренди реактора, або коли явно вказано "реактор", "reactor".
+- "в" — все що стосується роботи, послуг, документів, зарплат, сервісів, логістики, або коли явно вказано "в", "ворк", "work", "робота".
+- "р" — все що стосується проектів/об'єктів "Реактор", каси реактора, оренди реактора, або коли явно вказано "р", "реактор", "reactor".
 
-Якщо з тексту складно визначити категорію — обери найбільш відповідне із двох ("Ворк" або "Реактор").
+Якщо з тексту складно визначити категорію — обери найбільш відповідне із двох ("в" або "р").
 
 Якщо не можеш визначити суму — поверни null для amount.
 
 Поверни ТІЛЬКИ валідний JSON без додаткового тексту. Приклад:
-{{"amount": 250.0, "currency": "UAH", "description": "Кава з клієнтом", "category": "Ворк"}}
+{{"amount": 250.0, "transaction_type": "expense", "description": "Кава з клієнтом", "category": "в"}}
 """
 
 # ----------------------------------------------------
@@ -76,7 +76,7 @@ def transcribe_audio(file_path: str) -> str:
 
 
 def parse_expense(text: str) -> dict:
-    """Parses expense text into structured fields using Groq LLM."""
+    """Parses finance text into structured fields using Groq LLM."""
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
         messages=[
@@ -88,13 +88,13 @@ def parse_expense(text: str) -> dict:
     )
 
     data = json.loads(response.choices[0].message.content)
-    data["date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    if not data.get("currency"):
-        data["currency"] = "UAH"
+    data["date"] = datetime.now().strftime("%d.%m.%Y")
 
     if data.get("category") not in CATEGORIES:
-        data["category"] = "Ворк"
+        data["category"] = "в"
+
+    if data.get("transaction_type") not in ["income", "expense"]:
+        data["transaction_type"] = "expense"
 
     return data
 
@@ -112,18 +112,35 @@ def _get_gspread_client() -> gspread.Client:
 
 
 def append_expense(expense: dict) -> str:
-    """Appends an expense row to the Google Spreadsheet."""
+    """Appends an income/expense row to the Google Spreadsheet without currency column."""
     spreadsheet_id = os.getenv("SPREADSHEET_ID")
     gc = _get_gspread_client()
     spreadsheet = gc.open_by_key(spreadsheet_id)
     sheet = spreadsheet.sheet1
 
+    existing_records = sheet.get_all_values()
+    next_row = len(existing_records) + 1
+
+    amount = expense.get("amount", 0)
+    is_income = expense.get("transaction_type") == "income"
+
+    income_val = amount if is_income else ""
+    expense_val = amount if not is_income else ""
+
+    # Balance formula (Column D)
+    if next_row == 2:
+        balance_formula = "=B2-C2"
+    else:
+        balance_formula = f"=D{next_row-1}+B{next_row}-C{next_row}"
+
+    # Row format: [Дата, Дохід, Витрати, Баланс, Опис, Категорія]
     row = [
         expense.get("date", ""),
-        expense.get("amount", ""),
-        expense.get("currency", "UAH"),
+        income_val,
+        expense_val,
+        balance_formula,
         expense.get("description", ""),
-        expense.get("category", "Ворк"),
+        expense.get("category", "в"),
     ]
     sheet.append_row(row, value_input_option="USER_ENTERED")
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
@@ -151,31 +168,29 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(f"Transcribed: {text}")
 
         expense = parse_expense(text)
-        logger.info(f"Parsed expense: {expense}")
+        logger.info(f"Parsed finance: {expense}")
 
         if expense.get("amount") is None:
             await message.reply_text(
-                "❌ Не вдалося визначити суму витрати. Спробуй ще раз, назвавши конкретну суму."
+                "❌ Не вдалося визначити суму. Спробуй ще раз, назвавши конкретну суму."
             )
             return
 
         context.user_data["pending_expense"] = expense
         context.user_data["original_text"] = text
 
-        category_emoji = {
-            "Ворк": "💼",
-            "Реактор": "⚛️",
-        }
+        type_label = "📈 Дохід" if expense["transaction_type"] == "income" else "📉 Витрати"
+        category_emoji = {"в": "💼", "р": "⚛️"}
         emoji = category_emoji.get(expense["category"], "📌")
 
         confirmation_text = (
             f"📋 *Розпізнані дані:*\n\n"
             f"📅 Дата: `{expense['date']}`\n"
-            f"💰 Сума: `{expense['amount']} {expense['currency']}`\n"
+            f"{type_label}: `{expense['amount']}`\n"
             f"📝 Опис: `{expense['description']}`\n"
             f"{emoji} Категорія: `{expense['category']}`\n\n"
             f"_Текст: «{text}»_\n\n"
-            f"Зберегти цю витрату?"
+            f"Зберегти цю операцію?"
         )
 
         keyboard = InlineKeyboardMarkup([
@@ -207,7 +222,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if query.data == "confirm_expense":
         expense = context.user_data.get("pending_expense")
         if not expense:
-            await query.edit_message_text("⚠️ Дані витрати не знайдено. Спробуй знову.")
+            await query.edit_message_text("⚠️ Дані не знайдено. Спробуй знову.")
             return
 
         try:
@@ -241,7 +256,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         context.user_data.pop("original_text", None)
 
         await query.edit_message_text(
-            query.message.text + "\n\n❌ *Скасовано.* Витрата не записана.",
+            query.message.text + "\n\n❌ *Скасовано.* Операція не записана.",
             parse_mode="Markdown",
             reply_markup=None,
         )
@@ -249,10 +264,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Привіт! Я бот для обліку витрат.\n\n"
-        "Надішли мені 🎙️ *голосове повідомлення* з описом витрати, наприклад:\n"
-        "_«Витратив 250 гривень на каву з клієнтом»_\n\n"
-        "Я розпізнаю текст, визначу суму та категорію, і запитаю підтвердження перед записом у таблицю.",
+        "👋 Привіт! Я бот для обліку доходів та витрат.\n\n"
+        "Надішли мені 🎙️ *голосове повідомлення*, наприклад:\n"
+        "_«Отримав 5000 грн за проект, категорія в»_\n"
+        "_«Витратив 250 грн на каву, категорія р»_\n\n"
+        "Я визначу дохід чи витрату, розпізнаю суму, опис і категорію.",
         parse_mode="Markdown",
     )
 
