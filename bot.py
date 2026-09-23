@@ -100,7 +100,7 @@ def transcribe_audio(file_path: str) -> str:
 def parse_expense(text: str) -> dict:
     """Parses finance text into structured fields using Groq LLM."""
     response = groq_client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+                model="qwen/qwen3.8-27b",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
