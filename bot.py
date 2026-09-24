@@ -106,6 +106,7 @@ def parse_expense(text: str) -> dict:
             {"role": "user", "content": text},
         ],
         temperature=0,
+        max_tokens=150,
         response_format={"type": "json_object"},
     )
 
@@ -387,30 +388,3 @@ async def run_bot() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env файлі")
-
-    start_dummy_health_server()
-
-    app = (
-        ApplicationBuilder()
-        .token(token)
-        .post_init(post_init)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    logger.info("🤖 Бот запущено. Очікую повідомлення...")
-
-    async with app:
-        await app.start()
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        await asyncio.Event().wait()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("Бот зупинено.")
