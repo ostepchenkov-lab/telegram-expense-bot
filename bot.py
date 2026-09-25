@@ -33,6 +33,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_SPREADSHEET_ID = "186b3rkDElr5kw8ud-q9q_kFw1ZOwsk1-VVBSUfOXPqQ"
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -139,10 +141,11 @@ def _get_gspread_client() -> gspread.Client:
 
 
 def append_expense(expense: dict) -> str:
-    """Appends an income/expense row to the Google Spreadsheet without currency column."""
-    sid = os.getenv("SPREADSHEET_ID")
+    """Appends an income/expense row to the Google Spreadsheet with automatic ID fallback."""
+    sid = os.getenv("SPREADSHEET_ID", DEFAULT_SPREADSHEET_ID)
     if not sid:
-        raise ValueError("SPREADSHEET_ID не знайдено!")
+        sid = DEFAULT_SPREADSHEET_ID
+        
     gc = _get_gspread_client()
     spreadsheet = gc.open_by_key(sid)
     sheet = spreadsheet.sheet1
