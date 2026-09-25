@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 
 # ----------------------------------------------------
-# 1. Configuration & Clients Setup
+# 1. Configuration & Setup
 # ----------------------------------------------------
 load_dotenv()
 
@@ -32,9 +32,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -63,19 +60,12 @@ def clean_description_text(desc: str) -> str:
         return ""
     
     cleaned = desc
-    # Remove category markers
     cleaned = re.sub(r"категорі[яі]\s*«?[врвР]»?", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"категорі[яі]\s*«?(ворк|реактор)»?", "", cleaned, flags=re.IGNORECASE)
-    
-    # Remove expense/income prefix words
     cleaned = re.sub(r"^(витрати|витратив|витратила|оплатив|оплачено|отримав|заробив|прихід)\s*(в|на|за)?\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(витрати|витратив|витратила|оплатив|оплачено)\b", "", cleaned, flags=re.IGNORECASE)
-    
-    # Remove numbers and currency
     cleaned = re.sub(r"\b\d+([.,]\d+)?\b", "", cleaned)
     cleaned = re.sub(r"\b(гривень|гривні|грн|доларів|дол|usd|uah|євро)\b", "", cleaned, flags=re.IGNORECASE)
-    
-    # Remove leading/trailing punctuation and space
     cleaned = re.sub(r"^[.,\s\-–—:]+", "", cleaned)
     cleaned = re.sub(r"[.,\s\-–—:]+$", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -87,8 +77,13 @@ def clean_description_text(desc: str) -> str:
 # ----------------------------------------------------
 def transcribe_audio(file_path: str) -> str:
     """Transcribes audio using Groq Whisper API."""
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise ValueError("GROQ_API_KEY не знайдено у змінних оточення!")
+    client = Groq(api_key=key)
+
     with open(file_path, "rb") as audio_file:
-        transcript = groq_client.audio.transcriptions.create(
+        transcript = client.audio.transcriptions.create(
             model="whisper-large-v3",
             file=audio_file,
             language="uk",
@@ -99,7 +94,12 @@ def transcribe_audio(file_path: str) -> str:
 
 def parse_expense(text: str) -> dict:
     """Parses finance text into structured fields using Groq LLM."""
-    response = groq_client.chat.completions.create(
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
+        raise ValueError("GROQ_API_KEY не знайдено у змінних оточення!")
+    client = Groq(api_key=key)
+
+    response = client.chat.completions.create(
         model="qwen/qwen3.8-27b",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -113,7 +113,6 @@ def parse_expense(text: str) -> dict:
     data = json.loads(response.choices[0].message.content)
     data["date"] = datetime.now().strftime("%d.%m.%Y")
 
-    # Clean description with python regex safety net
     raw_desc = data.get("description", "")
     data["description"] = clean_description_text(raw_desc)
 
@@ -128,9 +127,10 @@ def parse_expense(text: str) -> dict:
 
 def _get_gspread_client() -> gspread.Client:
     """Returns authenticated gspread client from env string or file."""
-    creds_json_str = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if creds_json_str:
-        info = json.loads(creds_json_str)
+    c_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+    if c_json:
+        c_json = c_json.strip()
+        info = json.loads(c_json)
         creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     else:
         creds_file = os.getenv("GOOGLE_CREDENTIALS_FILE", "groshi-test-503314-4826b51946cd.json")
@@ -140,9 +140,11 @@ def _get_gspread_client() -> gspread.Client:
 
 def append_expense(expense: dict) -> str:
     """Appends an income/expense row to the Google Spreadsheet without currency column."""
-    spreadsheet_id = os.getenv("SPREADSHEET_ID")
+    sid = os.getenv("SPREADSHEET_ID")
+    if not sid:
+        raise ValueError("SPREADSHEET_ID не знайдено!")
     gc = _get_gspread_client()
-    spreadsheet = gc.open_by_key(spreadsheet_id)
+    spreadsheet = gc.open_by_key(sid)
     sheet = spreadsheet.sheet1
 
     existing_records = sheet.get_all_values()
@@ -154,13 +156,11 @@ def append_expense(expense: dict) -> str:
     income_val = amount if is_income else ""
     expense_val = amount if not is_income else ""
 
-    # Balance formula (Column D)
     if next_row == 2:
         balance_formula = "=B2-C2"
     else:
         balance_formula = f"=D{next_row-1}+B{next_row}-C{next_row}"
 
-    # Row format: [Дата, Дохід, Витрати, Баланс, Опис, Категорія]
     row = [
         expense.get("date", datetime.now().strftime("%d.%m.%Y")),
         income_val,
@@ -170,11 +170,11 @@ def append_expense(expense: dict) -> str:
         expense.get("category", "в"),
     ]
     sheet.append_row(row, value_input_option="USER_ENTERED")
-    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    return f"https://docs.google.com/spreadsheets/d/{sid}/edit"
 
 
 def parse_expense_from_message_text(msg_text: str) -> dict:
-    """Fallback parser: extracts expense data directly from the Telegram confirmation message text if memory is cleared after bot restart."""
+    """Fallback parser: extracts expense data directly from Telegram message text."""
     expense = {
         "date": datetime.now().strftime("%d.%m.%Y"),
         "amount": 0.0,
@@ -183,12 +183,10 @@ def parse_expense_from_message_text(msg_text: str) -> dict:
         "category": "в",
     }
     try:
-        # Date
         date_match = re.search(r"Дата:\s*`?([\d\.]+)`?", msg_text)
         if date_match:
             expense["date"] = date_match.group(1)
 
-        # Amount and Type
         if "Дохід:" in msg_text:
             expense["transaction_type"] = "income"
             amt_match = re.search(r"Дохід:\s*`?([\d\.]+)`?", msg_text)
@@ -200,12 +198,10 @@ def parse_expense_from_message_text(msg_text: str) -> dict:
             if amt_match:
                 expense["amount"] = float(amt_match.group(1))
 
-        # Description
         desc_match = re.search(r"Опис:\s*`?([^`\n]+)`?", msg_text)
         if desc_match:
             expense["description"] = clean_description_text(desc_match.group(1).strip())
 
-        # Category
         cat_match = re.search(r"Категорія:\s*`?([^`\n]+)`?", msg_text)
         if cat_match:
             cat_val = cat_match.group(1).strip()
@@ -291,13 +287,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         await query.answer()
     except Exception:
-        pass  # Query might be expired, proceed safely
+        pass
 
     if query.data == "confirm_expense":
-        # 1. Try memory
         expense = context.user_data.get("pending_expense")
 
-        # 2. Fallback: Parse directly from the message text if bot was restarted
         if not expense and query.message and query.message.text:
             logger.info("Memory empty. Falling back to parsing message text...")
             expense = parse_expense_from_message_text(query.message.text)
@@ -383,20 +377,21 @@ def start_dummy_health_server():
 # ----------------------------------------------------
 async def post_init(application):
     await application.bot.set_my_commands([
-        BotCommand("start", "Привітання та інструкція"),
+        BotCommand("start", "Запуск бота"),
     ])
 
 
 async def run_bot() -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env файлі")
+    t = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not t:
+        logger.error("CRITICAL: TELEGRAM_BOT_TOKEN is missing!")
+        raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у змінних оточення!")
 
     start_dummy_health_server()
 
     app = (
         ApplicationBuilder()
-        .token(token)
+        .token(t)
         .post_init(post_init)
         .build()
     )
@@ -405,7 +400,7 @@ async def run_bot() -> None:
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    logger.info("🤖 Бот запущено. Очікую повідомлення...")
+    logger.info("🤖 Бот успішно запущено. Очікую повідомлень...")
 
     async with app:
         await app.start()
