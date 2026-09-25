@@ -288,7 +288,10 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles confirm/cancel button presses."""
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass  # Query might be expired, proceed safely
 
     if query.data == "confirm_expense":
         # 1. Try memory
@@ -388,3 +391,30 @@ async def run_bot() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env файлі")
+
+    start_dummy_health_server()
+
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(post_init)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+
+    logger.info("🤖 Бот запущено. Очікую повідомлення...")
+
+    async with app:
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Бот зупинено.")
